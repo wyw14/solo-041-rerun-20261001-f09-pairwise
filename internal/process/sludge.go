@@ -61,3 +61,8 @@ func (p *Plant) RunCompensations(ctx context.Context) (int, error) {
 func (p *Plant) Pumps() []sludge.Pump {
 	return p.pumps.Snapshot()
 }
+
+// Compensations 返回全部处理线的补偿任务（含待重试、人工复核、重试耗尽）。
+func (p *Plant) Compensations() []journal.Compensation {
+	return p.compensations.Pending()
+}

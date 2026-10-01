@@ -2,12 +2,21 @@ package sludge
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/wyw14/cry-97/internal/model"
+)
+
+var (
+	ErrPumpNotFound         = errors.New("return pump is not found")
+	ErrPumpAssignment       = errors.New("pump assignment is invalid")
+	ErrPumpReadyStale       = errors.New("pump ready confirmation is stale")
+	ErrPumpReadyNoFlow      = errors.New("pump ready confirmation has no flow")
+	ErrPumpOwnershipChanged = errors.New("pump ownership changed before stop")
 )
 
 type Pump struct {
@@ -46,7 +55,7 @@ func (c *PumpController) Assign(pumpID string, sequenceID uuid.UUID, generation 
 	defer c.mu.Unlock()
 	pump, ok := c.pumps[pumpID]
 	if !ok || sequenceID == uuid.Nil || generation == 0 {
-		return Pump{}, errors.New("pump assignment is invalid")
+		return Pump{}, fmt.Errorf("%w: pump %s", ErrPumpAssignment, pumpID)
 	}
 	pump.OwnerSequence = sequenceID
 	pump.OwnerGeneration = generation
@@ -63,13 +72,14 @@ func (c *PumpController) Ready(pumpID string, sequenceID uuid.UUID, generation u
 	defer c.mu.Unlock()
 	pump, ok := c.pumps[pumpID]
 	if !ok {
-		return Pump{}, errors.New("return pump is not found")
+		return Pump{}, fmt.Errorf("%w: pump %s", ErrPumpNotFound, pumpID)
 	}
 	if pump.OwnerSequence != sequenceID || pump.OwnerGeneration != generation {
-		return Pump{}, errors.New("pump ready confirmation is stale")
+		return Pump{}, fmt.Errorf("%w: pump %s now owned by %s/g%d",
+			ErrPumpReadyStale, pumpID, pump.OwnerSequence, pump.OwnerGeneration)
 	}
 	if flow <= 0 {
-		return Pump{}, errors.New("pump ready confirmation has no flow")
+		return Pump{}, ErrPumpReadyNoFlow
 	}
 	pump.Primed = true
 	pump.Running = true
@@ -84,10 +94,14 @@ func (c *PumpController) StopOwned(pumpID string, sequenceID uuid.UUID, generati
 	defer c.mu.Unlock()
 	pump, ok := c.pumps[pumpID]
 	if !ok {
-		return Pump{}, errors.New("return pump is not found")
+		// 记录里的设备已不存在，无法安全操作，转人工复核。
+		return Pump{}, fmt.Errorf("%w: pump %s", ErrPumpNotFound, pumpID)
 	}
 	if pump.OwnerSequence != sequenceID || pump.OwnerGeneration != generation {
-		return Pump{}, errors.New("pump ownership changed before stop")
+		// 设备已被其他序列接管，绝不能按旧归属停新任务，转人工复核。
+		return Pump{}, fmt.Errorf("%w: pump %s now owned by %s/g%d, stale owner %s/g%d",
+			ErrPumpOwnershipChanged, pumpID,
+			pump.OwnerSequence, pump.OwnerGeneration, sequenceID, generation)
 	}
 	pump.Running = false
 	pump.Flow = 0

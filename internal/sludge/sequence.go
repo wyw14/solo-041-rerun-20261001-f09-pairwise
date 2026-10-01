@@ -3,6 +3,7 @@ package sludge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -91,7 +92,10 @@ func (b *SequenceBook) Fail(lineID model.LineID, now time.Time) (Sequence, error
 	if err != nil {
 		return Sequence{}, err
 	}
-	b.queue.Schedule(compensation)
+	// Schedule 按 (sequence, action, device) 幂等：同一故障重复上报不会叠加停泵任务。
+	if _, err := b.queue.Schedule(compensation); err != nil {
+		return Sequence{}, fmt.Errorf("persist stop-pump compensation: %w", err)
+	}
 	return sequence, nil
 }
 
@@ -100,9 +104,16 @@ func (b *SequenceBook) ExecuteCompensation(ctx context.Context, compensation jou
 		return err
 	}
 	if compensation.Action != "stop" {
-		return errors.New("unsupported sludge compensation action")
+		// 未知动作无法安全执行，也无法靠重试修复，转人工复核。
+		return fmt.Errorf("%w: unsupported sludge compensation action %q",
+			journal.ErrManualReviewRequired, compensation.Action)
 	}
 	_, err := b.pumps.StopOwned(compensation.DeviceID, compensation.SequenceID, compensation.Generation, now)
+	if errors.Is(err, ErrPumpOwnershipChanged) || errors.Is(err, ErrPumpNotFound) {
+		// 泵已被其他序列接管或设备已不存在：误停会伤到新任务，标记人工复核。
+		return fmt.Errorf("%w: %w: line %s device %s",
+			journal.ErrManualReviewRequired, err, compensation.LineID, compensation.DeviceID)
+	}
 	return err
 }
 
